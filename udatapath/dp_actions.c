@@ -787,40 +787,218 @@ push_mpls(struct packet *pkt, struct ofl_action_push *act) {
 
 
 static void
-read_all_mpls_labels(struct packet *pkt) {
+srmcast_push_labels(struct packet *pkt, void* labels, uint32_t labels_size) {
+    packet_handle_std_validate(pkt->handle_std);
+    if (pkt->handle_std->proto->eth != NULL) {
+        struct eth_header *eth, *new_eth;
+        struct mpls_header *push_mpls;
+        struct mpls_header *last_mpls;
+
+        size_t head_offset = ETH_HEADER_LEN;
+        eth = pkt->handle_std->proto->eth;
+
+        if (ofpbuf_headroom(pkt->buffer) >= labels_size) {
+            // there is available space in headroom, move eth backwards
+            pkt->buffer->data = (uint8_t *) (pkt->buffer->data) - labels_size;
+            pkt->buffer->size += labels_size;
+
+            memmove(pkt->buffer->data, eth, head_offset);
+            new_eth = (struct eth_header *) (pkt->buffer->data);
+            push_mpls = (struct mpls_header *) ((uint8_t *) new_eth + head_offset);
+
+        } else {
+            // not enough headroom, use tailroom of the packet
+
+            // Note: ofpbuf_put_uninit might relocate the whole packet
+            ofpbuf_put_uninit(pkt->buffer, labels_size);
+
+            new_eth = (struct eth_header *) (pkt->buffer->data);
+            push_mpls = (struct mpls_header *) ((uint8_t *) new_eth + head_offset);
+
+            // push data to create space for new MPLS
+            memmove((uint8_t *) push_mpls + labels_size, push_mpls,
+                    pkt->buffer->size - head_offset - labels_size);
+        }
+        memcpy(push_mpls, labels, labels_size);
+        last_mpls = (struct mpls_header *)((uint8_t *)push_mpls + labels_size - MPLS_HEADER_LEN);
+        if (last_mpls != NULL) {
+            last_mpls->fields = (last_mpls->fields & ~ntohl(MPLS_S_MASK))
+            | ntohl((1 << MPLS_S_SHIFT) & MPLS_S_MASK);
+//            last_mpls->fields = last_mpls->fields & ~htonl(MPLS_S_MASK);
+        }
+
+        new_eth->eth_type = htons(ETH_TYPE_MPLS);
+        packet_handle_std_validate(pkt->handle_std);
+    }
+}
+
+
+static void
+srmcast_process_mcast(struct packet *pkt) {
     packet_handle_std_validate(pkt->handle_std);
     if (pkt->handle_std->proto->eth != NULL && pkt->handle_std->proto->mpls != NULL) {
         struct eth_header *eth = pkt->handle_std->proto->eth;
         struct mpls_header *mpls = pkt->handle_std->proto->mpls;
         struct ip_header *ipv4 = pkt->handle_std->proto->ipv4;
+
+        struct packet *pkt_clone;
         size_t move_size;
         size_t mpls_size;
+        struct sw_port *p;
+        struct datapath *dp;
+        uint32_t port_id;
+        uint32_t port_shift;
+
+        void *mpls_data;
+        void *br_mpls_data;
+
+        uint32_t out_port;
+        uint32_t mpls_fields;
+        uint32_t mpls_label;
+        uint32_t srmcast_content;
+
+        uint32_t br_mpls_fields;
+        uint32_t br_mpls_label;
+        uint32_t br_labels_size;
+        uint32_t br_srmcast_code;
+        uint32_t br_srmcast_content;
+
+//        uint32_t br_last_mpls_fields;
+
+        dp = pkt->dp;
 
         if (eth != NULL && mpls != NULL && ipv4 != NULL) {
-            VLOG_WARN(LOG_MODULE, "BEFORE: eth = %p\n", eth);
-            VLOG_WARN(LOG_MODULE, "BEFORE: mpls = %p\n", mpls);
-            VLOG_WARN(LOG_MODULE, "BEFORE: data = %p\n", pkt->buffer->data);
-            VLOG_WARN(LOG_MODULE, "BEFORE: ip = %p\n", ipv4);
+            mpls_fields = ntohl(mpls->fields);
+            mpls_label = mpls_fields >> MPLS_LABEL_SHIFT;
+            srmcast_content = mpls_label & SRMCAST_CONTENT_MASK;
 
             eth->eth_type = htons(ETH_TYPE_IP);
+            // remove all labels
             move_size = (uint8_t *)mpls - (uint8_t *)eth;
             mpls_size = (uint8_t *)ipv4 - (uint8_t *)mpls;
-            VLOG_WARN(LOG_MODULE, "MPLS SIZE = %zu\n", mpls_size);
+
+            mpls_data = xmalloc(mpls_size);
+            memcpy(mpls_data, mpls, mpls_size);
+
             pkt->buffer->data = (uint8_t *)pkt->buffer->data + mpls_size;
             pkt->buffer->size -= mpls_size;
             memmove(pkt->buffer->data, eth, move_size);
-
-//            packet_handle_std_validate(pkt->handle_std);
-//            eth = pkt->handle_std->proto->eth;
-//            mpls = pkt->handle_std->proto->mpls;
             pkt->handle_std->valid = false;
-            VLOG_WARN(LOG_MODULE, "AFTER: eth = %p\n", eth);
-            VLOG_WARN(LOG_MODULE, "AFTER: mpls = %p\n", mpls);
-            VLOG_WARN(LOG_MODULE, "AFTER: data = %p\n", pkt->buffer->data);
-            VLOG_WARN(LOG_MODULE, "BEFORE: ip = %p\n", ipv4);
+            packet_handle_std_validate(pkt->handle_std);
+
+            // remove multicast label
+            mpls_data = (uint8_t *)mpls_data + MPLS_HEADER_LEN;
+
+            // get labels for each branch
+            LIST_FOR_EACH (p, struct sw_port, node, &dp->port_list) {
+                if (IS_HW_PORT(p) || p->conf->port_no <= 0) {
+                    continue;
+                }
+                port_id = 1;
+                port_shift = p->conf->port_no - 1;
+                if ((port_id << port_shift) & srmcast_content) {
+                    memcpy(&br_mpls_fields, mpls_data, MPLS_HEADER_LEN);
+                    mpls_data = (uint8_t *)mpls_data + MPLS_HEADER_LEN;
+
+                    br_mpls_fields = ntohl(br_mpls_fields);
+                    br_mpls_label = br_mpls_fields >> MPLS_LABEL_SHIFT;
+                    br_srmcast_code = br_mpls_label >> SRMCAST_CODE_SHIFT;
+
+                    if (br_srmcast_code == 1) {
+                        out_port = p->conf->port_no;
+                        br_srmcast_content = br_mpls_label & SRMCAST_CONTENT_MASK;
+                        pkt_clone = packet_clone(pkt);
+                        if (br_srmcast_content > 0) {
+//                            mpls->fields = (mpls->fields & ~ntohl(MPLS_S_MASK))
+//                                           | ntohl((*act->field->value << MPLS_S_SHIFT) & MPLS_S_MASK);
+                            br_labels_size = br_srmcast_content * MPLS_HEADER_LEN;
+                            br_mpls_data = xmalloc(br_labels_size);
+                            memcpy(br_mpls_data, mpls_data, br_labels_size);
+                            srmcast_push_labels(pkt_clone, br_mpls_data, br_labels_size);
+                            mpls_data = (uint8_t *) mpls_data + br_labels_size;
+                        }
+                        dp_ports_output(pkt_clone->dp, pkt_clone->buffer, out_port, 0);
+                    }
+                }
+            }
         }
     } else {
         VLOG_WARN_RL(LOG_MODULE, &rl, "Trying to execute Clean MPLS on packet with no eth/mpls.");
+    }
+}
+
+static void
+srmcast_process(struct packet *pkt) {
+    packet_handle_std_validate(pkt->handle_std);
+    if (pkt->handle_std->proto->eth != NULL && pkt->handle_std->proto->mpls != NULL) {
+        struct eth_header *eth = pkt->handle_std->proto->eth;
+        struct mpls_header *mpls = pkt->handle_std->proto->mpls;
+
+        size_t move_size;
+        struct datapath *dp;
+        struct packet *pkt_clone;
+        uint32_t mpls_fields;
+        uint32_t mpls_label;
+        uint32_t srmcast_code;
+        uint32_t srmcast_content;
+
+        uint32_t out_port;
+
+        dp = pkt->dp;
+        mpls_fields = ntohl(mpls->fields);
+        mpls_label = mpls_fields >> MPLS_LABEL_SHIFT;
+        srmcast_code = mpls_label >> SRMCAST_CODE_SHIFT;
+        srmcast_content = mpls_label & SRMCAST_CONTENT_MASK;
+
+        if (srmcast_code == 0) {
+            // multicast label
+            pkt_clone = packet_clone(pkt);
+            srmcast_process_mcast(pkt_clone);
+            packet_handle_std_validate(pkt_clone->handle_std);
+            packet_destroy(pkt_clone);
+        } else if (srmcast_code == 2) {
+            // node label
+//            VLOG_WARN(LOG_MODULE, "Node label: %d\n", srmcast_content);
+            if (srmcast_content == dp->id) {
+                // remove the label
+                // should we clone?
+                move_size = (uint8_t *)mpls - (uint8_t *)eth;
+                pkt->buffer->data = (uint8_t *)pkt->buffer->data + MPLS_HEADER_LEN;
+                pkt->buffer->size -= MPLS_HEADER_LEN;
+                memmove(pkt->buffer->data, eth, move_size);
+                srmcast_process(pkt);
+            } else {
+                // TODO: get the out_port from dp->FIB[srmcast_content]
+                out_port = 1;
+                // should we clone?
+                dp_ports_output(dp, pkt->buffer, out_port, 0);
+            }
+
+        } else if (srmcast_code == 3) {
+            // adjacent label
+            VLOG_WARN(LOG_MODULE, "Adjacent label: %d\n", srmcast_content);
+            out_port = srmcast_content;
+            // remove the label
+            move_size = (uint8_t *)mpls - (uint8_t *)eth;
+            pkt->buffer->data = (uint8_t *)pkt->buffer->data + MPLS_HEADER_LEN;
+            pkt->buffer->size -= MPLS_HEADER_LEN;
+            memmove(pkt->buffer->data, eth, move_size);
+            packet_handle_std_validate(pkt->handle_std);
+            eth = pkt->handle_std->proto->eth;
+            mpls = pkt->handle_std->proto->mpls;
+            if(((uint8_t *) mpls - (uint8_t *) eth) == 0 ) {
+                eth->eth_type = htons(ETH_TYPE_IP);
+            } else {
+                eth->eth_type = htons(ETH_TYPE_MPLS);
+            }
+            packet_handle_std_validate(pkt->handle_std);
+            // send the packet, should we clone?
+            dp_ports_output(dp, pkt->buffer, out_port, 0);
+        }
+    } else if (pkt->handle_std->proto->eth != NULL) {
+//        VLOG_WARN(LOG_MODULE, "MPLS: %p\n", pkt->handle_std->proto->mpls);
+//        VLOG_WARN(LOG_MODULE, "IPv4: %p\n", pkt->handle_std->proto->ipv4);
+        dp_ports_output(pkt->dp, pkt->buffer, 1, 0);
     }
 }
 
@@ -832,19 +1010,8 @@ pop_mpls(struct packet *pkt, struct ofl_action_pop_mpls *act) {
         struct eth_header *eth = pkt->handle_std->proto->eth;
         struct snap_header *snap = pkt->handle_std->proto->eth_snap;
         struct vlan_header *vlan_last = pkt->handle_std->proto->vlan_last;
-        struct mpls_header *mpls = pkt->handle_std->proto->mpls;
+//        struct mpls_header *mpls = pkt->handle_std->proto->mpls;
 
-        size_t move_size;
-        struct datapath *dp;
-        struct packet *pkt_clone;
-        uint32_t mpls_fields;
-        uint32_t mpls_label;
-        uint32_t srmcast_code;
-        uint32_t srmcast_content;
-
-        uint32_t port_id;
-        uint32_t port_shift;
-        struct sw_port *p;
 
         if (vlan_last != NULL) {
             vlan_last->vlan_next_type = htons(act->ethertype);
@@ -853,51 +1020,8 @@ pop_mpls(struct packet *pkt, struct ofl_action_pop_mpls *act) {
         } else {
             eth->eth_type = htons(act->ethertype);
         }
-        dp = pkt->dp;
-        mpls_fields = ntohl(mpls->fields);
-        mpls_label = mpls_fields >> MPLS_LABEL_SHIFT;
-        srmcast_code = mpls_label >> SRMCAST_CODE_SHIFT;
-        srmcast_content = mpls_label & SRMCAST_CONTENT_MASK;
 
-        if (srmcast_code == 0) {
-            // multicast label
-            pkt_clone = packet_clone(pkt);
-            read_all_mpls_labels(pkt_clone);
-            packet_handle_std_validate(pkt_clone->handle_std);
-            VLOG_WARN(LOG_MODULE, "CLONE eth: %p", pkt_clone->handle_std->proto->eth);
-            VLOG_WARN(LOG_MODULE, "CLONE ipv4: %p", pkt_clone->handle_std->proto->ipv4);
-            VLOG_WARN(LOG_MODULE, "Multicast label: %d\n", srmcast_content);
-            LIST_FOR_EACH (p, struct sw_port, node, &dp->port_list) {
-                if (IS_HW_PORT(p) || p->conf->port_no <= 0) {
-                    continue;
-                }
-                port_id = 1;
-                port_shift = p->conf->port_no - 1;
-                if ((port_id << port_shift) & srmcast_content) {
-//                    VLOG_WARN(LOG_MODULE, "Port number: %d, name: %s\n", p->conf->port_no, p->conf->name);
-                }
-            }
-
-        } else if (srmcast_code == 1) {
-            // offset label
-            VLOG_WARN(LOG_MODULE, "Offset label: %d\n", srmcast_content);
-
-        } else if (srmcast_code == 2) {
-            // node label
-            VLOG_WARN(LOG_MODULE, "Node label: %d\n", srmcast_content);
-
-        } else if (srmcast_code == 3) {
-            // adjacent label
-            VLOG_WARN(LOG_MODULE, "Adjacent label: %d\n", srmcast_content);
-        }
-
-//        move_size = (uint8_t *)mpls - (uint8_t *)eth;
-//        pkt->buffer->data = (uint8_t *)pkt->buffer->data + MPLS_HEADER_LEN;
-//        pkt->buffer->size -= MPLS_HEADER_LEN;
-//
-//        memmove(pkt->buffer->data, eth, move_size);
-//
-//        VLOG_WARN(LOG_MODULE, "Move size: %zu\n", move_size);
+        srmcast_process(pkt);
 
         if (snap != NULL) {
             struct eth_header *new_eth = (struct eth_header *)(pkt->buffer->data);
