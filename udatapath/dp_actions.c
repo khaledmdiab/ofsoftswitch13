@@ -750,13 +750,14 @@ push_mpls(struct packet *pkt, struct ofl_action_push *act) {
 
 /* Executes pop mpls action. */
 //static void
-//_pop_mpls(struct packet *pkt, struct ofl_action_pop_mpls *act) {
+//pop_mpls(struct packet *pkt, struct ofl_action_pop_mpls *act) {
 //    packet_handle_std_validate(pkt->handle_std);
 //    if (pkt->handle_std->proto->eth != NULL && pkt->handle_std->proto->mpls != NULL) {
 //        struct eth_header *eth = pkt->handle_std->proto->eth;
 //        struct snap_header *snap = pkt->handle_std->proto->eth_snap;
 //        struct vlan_header *vlan_last = pkt->handle_std->proto->vlan_last;
 //        struct mpls_header *mpls = pkt->handle_std->proto->mpls;
+//        struct ip_header *ipv4 = pkt->handle_std->proto->ipv4;
 //        size_t move_size;
 //
 //        if (vlan_last != NULL) {
@@ -786,35 +787,47 @@ push_mpls(struct packet *pkt, struct ofl_action_push *act) {
 
 
 static void
-clean_mpls_pkt(struct packet *pkt) {
+read_all_mpls_labels(struct packet *pkt) {
     packet_handle_std_validate(pkt->handle_std);
     if (pkt->handle_std->proto->eth != NULL && pkt->handle_std->proto->mpls != NULL) {
         struct eth_header *eth = pkt->handle_std->proto->eth;
         struct mpls_header *mpls = pkt->handle_std->proto->mpls;
+        struct ip_header *ipv4 = pkt->handle_std->proto->ipv4;
+//        struct ipv6_header *ipv6 = pkt->handle_std->proto->ipv6;
         size_t move_size;
-        uint32_t label_count;
-
-        label_count = 0;
-        while (eth != NULL && mpls != NULL) {
+        size_t mpls_size;
+//        uint32_t label_count;
+//        VLOG_WARN(LOG_MODULE, "BEFORE: ipv4 = %p", ipv4);
+//        if (ipv4 != NULL) {
+//            VLOG_WARN(LOG_MODULE, "ipv4 src = "IP_FMT, IP_ARGS(&ipv4->ip_src));
+//        }
+//        VLOG_WARN(LOG_MODULE, "BEFORE: ipv6 = %p\n", ipv6);
+//        label_count = 0;
+        if (eth != NULL && mpls != NULL && ipv4 != NULL) {
             VLOG_WARN(LOG_MODULE, "BEFORE: eth = %p\n", eth);
             VLOG_WARN(LOG_MODULE, "BEFORE: mpls = %p\n", mpls);
             VLOG_WARN(LOG_MODULE, "BEFORE: data = %p\n", pkt->buffer->data);
-            label_count += 1;
+            VLOG_WARN(LOG_MODULE, "BEFORE: ip = %p\n", ipv4);
+//            label_count += 1;
             eth->eth_type = htons(ETH_TYPE_IP);
             move_size = (uint8_t *)mpls - (uint8_t *)eth;
-            pkt->buffer->data = (uint8_t *)pkt->buffer->data + MPLS_HEADER_LEN;
-            pkt->buffer->size -= MPLS_HEADER_LEN;
+            mpls_size = (uint8_t *)ipv4 - (uint8_t *)mpls;
+            VLOG_WARN(LOG_MODULE, "MPLS SIZE = %zu\n", mpls_size);
+            pkt->buffer->data = (uint8_t *)pkt->buffer->data + mpls_size;
+            pkt->buffer->size -= mpls_size;
             memmove(pkt->buffer->data, eth, move_size);
             VLOG_WARN(LOG_MODULE, "move_size = %zu\n", move_size);
-            pkt->handle_std = packet_handle_std_create(pkt);
-//            packet_handle_std_validate(pkt->handle_std);
-            eth = pkt->handle_std->proto->eth;
-            mpls = pkt->handle_std->proto->mpls;
+
+//            pkt->handle_std = packet_handle_std_create(pkt);
+            packet_handle_std_validate(pkt->handle_std);
+//            eth = pkt->handle_std->proto->eth;
+//            mpls = pkt->handle_std->proto->mpls;
             VLOG_WARN(LOG_MODULE, "AFTER: eth = %p\n", eth);
             VLOG_WARN(LOG_MODULE, "AFTER: mpls = %p\n", mpls);
             VLOG_WARN(LOG_MODULE, "AFTER: data = %p\n", pkt->buffer->data);
+            VLOG_WARN(LOG_MODULE, "BEFORE: ip = %p\n", ipv4);
         }
-        VLOG_WARN(LOG_MODULE, "label_count = %d\n", label_count);
+//        VLOG_WARN(LOG_MODULE, "label_count = %d\n", label_count);
     } else {
         VLOG_WARN_RL(LOG_MODULE, &rl, "Trying to execute Clean MPLS on packet with no eth/mpls.");
     }
@@ -859,7 +872,7 @@ pop_mpls(struct packet *pkt, struct ofl_action_pop_mpls *act) {
             // multicast label
             pkt_clone = packet_clone(pkt);
             VLOG_WARN(LOG_MODULE, "Before clean %s\n", packet_to_string(pkt_clone));
-            clean_mpls_pkt(pkt_clone);
+            read_all_mpls_labels(pkt_clone);
             VLOG_WARN(LOG_MODULE, "After clean %s\n", packet_to_string(pkt_clone));
             VLOG_WARN(LOG_MODULE, "Multicast label: %d\n", srmcast_content);
             LIST_FOR_EACH (p, struct sw_port, node, &dp->port_list) {
@@ -1167,10 +1180,14 @@ void
 dp_execute_action_list(struct packet *pkt,
                 size_t actions_num, struct ofl_action_header **actions, uint64_t cookie) {
     size_t i;
+//    struct ip_header *ipv4 = pkt->handle_std->proto->ipv4;
 
     VLOG_DBG_RL(LOG_MODULE, &rl, "Executing action list.");
 
     for (i=0; i < actions_num; i++) {
+//        if (actions[i]->type == OFPAT_POP_MPLS) {
+//            VLOG_WARN(LOG_MODULE, "IPv4: %p", ipv4);
+//        }
         dp_execute_action(pkt, actions[i]);
 
         if (pkt->out_group != OFPG_ANY) {

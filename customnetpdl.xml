@@ -253,20 +253,27 @@
 	</format>
 
 	<encapsulation>
-		<if expr="buf2int(s) == 1">
-			<if-true>
-				<switch expr="buf2int(label)">
-					<case value="0"> <nextproto proto="#ip"/> </case>
-					<case value="2"> <nextproto proto="#ipv6"/> </case>
-					<default> 
-						<nextproto proto="#ip"/>
-					</default>		
-				</switch>
-			</if-true>	
-			<if-false>
+		<switch expr="buf2int(bos)">
+			<case value="0"> <nextproto proto="#mpls"/> </case>
+			<case value="1"> <nextproto proto="#ip"/> </case>
+			<default>
 				<nextproto proto="#mpls"/>
-			</if-false>
-		</if>
+			</default>
+		</switch>
+		<!--<if expr="buf2int(s) == 1">-->
+			<!--<if-true>-->
+				<!--<switch expr="buf2int(label)">-->
+					<!--<case value="0"> <nextproto proto="#ip"/> </case>-->
+					<!--<case value="2"> <nextproto proto="#ipv6"/> </case>-->
+					<!--<default> -->
+						<!--<nextproto proto="#ip"/>-->
+					<!--</default>		-->
+				<!--</switch>-->
+			<!--</if-true>	-->
+			<!--<if-false>-->
+				<!--<nextproto proto="#mpls"/>-->
+			<!--</if-false>-->
+		<!--</if>-->
 	</encapsulation>
 
 	<visualization>
