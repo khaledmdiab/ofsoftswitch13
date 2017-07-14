@@ -68,6 +68,8 @@
 #define THIS_MODULE VLM_udatapath
 #include "vlog.h"
 
+#define LOG_MODULE VLM_main
+
 int udatapath_cmd(int argc, char *argv[]);
 
 static void parse_options(struct datapath *dp, int argc, char *argv[]);
@@ -79,6 +81,8 @@ static char *port_list;
 static char *local_port = "tap:";
 
 static void add_ports(struct datapath *dp, char *port_list);
+
+static void add_srmcast_neighbors(struct datapath *dp, char *port_list);
 
 static bool use_multiple_connections = false;
 
@@ -224,6 +228,7 @@ parse_options(struct datapath *dp, int argc, char *argv[])
         {"verbose",     optional_argument, 0, 'v'},
         {"help",        no_argument, 0, 'h'},
         {"version",     no_argument, 0, 'V'},
+        {"neighbors-ports",  required_argument, 0, 'n'},
         {"no-slicing",  no_argument, 0, OPT_NO_SLICING},
         {"mfr-desc",    required_argument, 0, OPT_MFR_DESC},
         {"hw-desc",     required_argument, 0, OPT_HW_DESC},
@@ -267,6 +272,11 @@ parse_options(struct datapath *dp, int argc, char *argv[])
         
         case 'm': {
             use_multiple_connections = true;
+            break;
+        }
+
+        case 'n': {
+            add_srmcast_neighbors(dp, optarg);
             break;
         }
         
@@ -360,6 +370,8 @@ usage(void)
            "                          (ID must consist of 12 hex digits)\n"
            "  -m, --multiconn         enable multiple connections to the\n"
            "                          same controller.\n"
+           "  -n, --neighbors-ports   (SR-MCAST) comma-separated neighbor-port:\n"
+           "                          e.g., neigh1:port1,neigh2:port2 etc...\n"
            "  --no-slicing            disable slicing\n"
            "\nOther options:\n"
            "  -D, --detach            run in background as daemon\n"
@@ -371,4 +383,37 @@ usage(void)
            "  -V, --version           display version information\n",
         ofp_rundir);
     exit(EXIT_SUCCESS);
+}
+
+
+static void
+add_srmcast_neighbors(struct datapath *dp, char *port_list) {
+    char *end_str;
+    char *end_token;
+    char *inner_token;
+    uint32_t value = 0;
+    uint32_t neighbor_dpid = 0;
+    uint32_t neighbor_port = 0;
+    char *pair_token = strtok_r(port_list, ",", &end_str);
+
+    while (pair_token != NULL)
+    {
+        inner_token = strtok_r(pair_token, ":", &end_token);
+        while (inner_token != NULL)
+        {
+            value = (uint32_t)strtoul(inner_token, NULL, 10);
+            if(neighbor_dpid == 0) {
+                neighbor_dpid = value;
+            } else if (neighbor_port == 0) {
+                neighbor_port = value;
+            }
+            inner_token = strtok_r(NULL, ":", &end_token);
+        }
+        dp_add_srmcast_neighbor(dp, neighbor_dpid, neighbor_port);
+        VLOG_WARN(LOG_MODULE, "Adding neighbor %d of port %d", neighbor_dpid, neighbor_port);
+        neighbor_dpid = 0;
+        neighbor_port = 0;
+        pair_token = strtok_r(NULL, ",", &end_str);
+    }
+
 }

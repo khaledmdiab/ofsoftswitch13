@@ -53,11 +53,22 @@
 #include "group_table.h"
 #include "timeval.h"
 #include "list.h"
+#include "hmap.h"
 
 
 struct rconn;
 struct pvconn;
 struct sender;
+
+
+struct srmcast_fib_entry {
+    struct hmap_node node;
+
+    uint32_t dpid;
+    uint32_t port;
+};
+
+
 
 /****************************************************************************
  * The datapath
@@ -104,6 +115,9 @@ struct datapath {
     struct sw_port  *local_port;  /* OFPP_LOCAL port, if any. */
     struct list      port_list; /* All ports, including local_port. */
     size_t           ports_num;
+
+    /* SR MCAST */
+    struct hmap       srmcast_fib;
 
     /* Experimenter handling. */
     struct ofl_exp  *exp;
@@ -199,6 +213,14 @@ dp_set_max_queues(struct datapath *dp, uint32_t max_queues);
 int
 dp_send_message(struct datapath *dp, struct ofl_msg_header *msg,
                      const struct sender *sender);
+
+
+/* SR MCAST */
+void
+dp_add_srmcast_neighbor(struct datapath *dp, uint32_t neighbor_dpid, uint32_t port);
+
+uint32_t
+dp_find_srmcast_neighbor(struct datapath *dp, uint32_t neighbor_dpid);
 
 
 

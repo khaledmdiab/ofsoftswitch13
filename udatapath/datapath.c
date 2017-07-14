@@ -165,6 +165,9 @@ dp_new(void) {
         snprintf(dp->dp_desc, strlen(hostnametmp) + 5 + strlen(pid),"%s pid=%s",hostnametmp, pid);
     }
 
+    /* SR MCAST */
+    hmap_init(&dp->srmcast_fib);
+
     /* FIXME: Should not depend on udatapath_as_lib */
     #if defined(OF_HW_PLAT) && (defined(UDATAPATH_AS_LIB) || defined(USE_NETDEV))
         dp_hw_drv_init(dp);
@@ -581,6 +584,34 @@ dp_send_message(struct datapath *dp, struct ofl_msg_header *msg,
     }
     return 0;
 }
+
+
+void
+dp_add_srmcast_neighbor(struct datapath *dp, uint32_t neighbor_dpid, uint32_t port) {
+    struct srmcast_fib_entry *entry = xmalloc(sizeof(struct srmcast_fib_entry));
+
+    entry->dpid = neighbor_dpid;
+    entry->port = port;
+
+    hmap_insert(&dp->srmcast_fib, &entry->node, entry->dpid);
+}
+
+
+uint32_t
+dp_find_srmcast_neighbor(struct datapath *dp, uint32_t dpid) {
+    struct hmap_node *hnode;
+    struct srmcast_fib_entry *entry;
+
+    hnode = hmap_first_with_hash(&dp->srmcast_fib, dpid);
+
+    if (hnode == NULL) {
+        return -1;
+    }
+
+    entry =  CONTAINER_OF(hnode, struct srmcast_fib_entry, node);
+    return entry->port;
+}
+
 
 ofl_err
 dp_handle_set_desc(struct datapath *dp, struct ofl_exp_openflow_msg_set_dp_desc *msg,
