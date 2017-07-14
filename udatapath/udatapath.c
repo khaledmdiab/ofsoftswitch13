@@ -385,7 +385,7 @@ usage(void)
     exit(EXIT_SUCCESS);
 }
 
-
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 static void
 add_srmcast_neighbors(struct datapath *dp, char *port_list) {
     char *end_str;
