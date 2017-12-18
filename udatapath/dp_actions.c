@@ -860,8 +860,6 @@ srmcast_process_mcast(struct packet *pkt) {
         uint32_t br_srmcast_code;
         uint32_t br_srmcast_content;
 
-//        uint32_t br_last_mpls_fields;
-
         dp = pkt->dp;
 
         if (eth != NULL && mpls != NULL && ipv4 != NULL) {
@@ -880,8 +878,6 @@ srmcast_process_mcast(struct packet *pkt) {
             pkt->buffer->data = (uint8_t *)pkt->buffer->data + mpls_size;
             pkt->buffer->size -= mpls_size;
             memmove(pkt->buffer->data, eth, move_size);
-//            pkt->handle_std->valid = false;
-//            packet_handle_std_validate(pkt->handle_std);
 
             // remove multicast label
             mpls_data = (uint8_t *)mpls_data + MPLS_HEADER_LEN;
@@ -925,7 +921,6 @@ srmcast_process_mcast(struct packet *pkt) {
 
 static void
 srmcast_process(struct packet *pkt, bool node_label) {
-//    if (!node_label)
     packet_handle_std_validate(pkt->handle_std);
 
     if (node_label)
